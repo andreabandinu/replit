@@ -1,7 +1,9 @@
 import numpy as np
 import pandas as pd
+from scipy.stats import norm
+import yfinance as yf
 
-def calculate_metrics(df):
+def calculate_metrics(df, market_ticker='^GSPC'):
     """
     Calculate various financial performance and risk metrics.
     """
@@ -21,15 +23,38 @@ def calculate_metrics(df):
     drawdown = (cum_returns - running_max) / running_max
     max_drawdown = drawdown.min() * 100
     
-    # Alpha and Beta (assuming risk-free rate of 2% and market returns of 8%)
-    risk_free_rate = 0.02 / 252  # daily
-    market_returns = 0.08 / 252  # daily
-    excess_returns = returns - risk_free_rate
-    market_excess_returns = market_returns - risk_free_rate
+    # Alpha and Beta calculation using S&P 500 as market index
+    try:
+        # Fetch market data
+        market_data = yf.download(market_ticker, start=df.index[0], end=df.index[-1])
+        market_returns = market_data['Close'].pct_change().dropna()
+
+        # Align dates
+        aligned_returns = returns.align(market_returns, join='inner')
+        stock_returns = aligned_returns[0]
+        market_returns = aligned_returns[1]
+
+        # Calculate excess returns
+        risk_free_rate = 0.02 / 252  # Assuming 2% annual risk-free rate
+        excess_returns = stock_returns - risk_free_rate
+        market_excess_returns = market_returns - risk_free_rate
+
+        # Calculate beta
+        beta = excess_returns.cov(market_excess_returns) / market_excess_returns.var()
+
+        # Calculate alpha
+        alpha = (stock_returns.mean() - risk_free_rate) - (beta * (market_returns.mean() - risk_free_rate))
+
+        # Annualize alpha
+        alpha_annualized = alpha * 252
+
+    except Exception as e:
+        print(f"Error calculating Alpha and Beta: {e}")
+        alpha_annualized = np.nan
+        beta = np.nan
     
-    # Calculate beta using covariance and variance
-    beta = excess_returns.cov(pd.Series([market_excess_returns] * len(excess_returns))) / np.var([market_excess_returns] * len(excess_returns))
-    alpha = returns.mean() - (risk_free_rate + beta * market_excess_returns)
+    # Monte Carlo VaR, ES, and CVaR
+    mc_var, mc_es, mc_cvar = monte_carlo_risk_metrics(returns)
     
     return {
         'roi': roi,
@@ -37,6 +62,42 @@ def calculate_metrics(df):
         'var': var,
         'std_dev': std_dev,
         'max_drawdown': max_drawdown,
-        'alpha': alpha * 252,  # annualized
-        'beta': beta
+        'alpha': alpha_annualized,
+        'beta': beta,
+        'mc_var': mc_var,
+        'mc_es': mc_es,
+        'mc_cvar': mc_cvar
     }
+
+def monte_carlo_risk_metrics(returns, num_simulations=10000, confidence_level=0.95):
+    """
+    Perform Monte Carlo simulation to calculate Value at Risk (VaR), Expected Shortfall (ES),
+    and Conditional Value at Risk (CVaR).
+    Returns VaR, ES, and CVaR as percentages of the initial investment.
+    """
+    mean_return = returns.mean()
+    std_dev = returns.std()
+    
+    # Generate random returns
+    simulated_returns = np.random.normal(mean_return, std_dev, size=(len(returns), num_simulations))
+    
+    # Calculate cumulative returns
+    cumulative_returns = np.cumprod(1 + simulated_returns, axis=0)
+    
+    # Calculate portfolio value at the end of the simulation period
+    final_values = cumulative_returns[-1]
+    
+    # Sort the final values
+    sorted_final_values = np.sort(final_values)
+    
+    # Calculate VaR
+    var_index = int(num_simulations * (1 - confidence_level))
+    var = (1 - sorted_final_values[var_index]) * 100  # Convert to percentage
+    
+    # Calculate ES
+    es = (1 - np.mean(sorted_final_values[:var_index])) * 100  # Convert to percentage
+    
+    # Calculate CVaR (mean of returns below VaR)
+    cvar = (1 - np.mean(sorted_final_values[:var_index])) * 100  # Convert to percentage
+    
+    return var, es, cvar
